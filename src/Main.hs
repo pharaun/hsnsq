@@ -84,7 +84,7 @@ nsqParserErrorLogging l producer = do
 
     case result of
         Nothing -> liftIO $ BS.hPutStr l "Pipe is exhausted for nsq parser\n"
-        Just y  ->
+        Just y  -> do
             case y of
                 Right x -> traceShow x $ yield x
                 Left x  -> liftIO $ BS.hPutStr l $ BS.concat
@@ -94,7 +94,7 @@ nsqParserErrorLogging l producer = do
                             , "\n"
                             , "===========\n"
                             ]
-    nsqParserErrorLogging l rest
+            nsqParserErrorLogging l rest
 
 --
 -- Format outbound NSQ Commands
@@ -111,6 +111,7 @@ handshake :: Monad m => ServerState -> Producer NSQ.Command m ()
 handshake ss = do
 
     yield $ NSQ.Protocol
+    yield $ NSQ.Identify $ (NSQ.defaultIdentify "pharaun-ASDF" "netheril.elder.lan."){NSQ.heartbeatInterval = Just $ NSQ.Custom 1000}
 
     return ()
 
