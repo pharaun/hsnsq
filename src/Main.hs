@@ -21,6 +21,7 @@ import Pipes
 import qualified Network.NSQ as NSQ
 import Control.Applicative
 
+import Debug.Trace
 
 -- Per server config for the test
 data ServerConfig = ServerConfig
@@ -67,10 +68,10 @@ establish sc = PNT.withSocketsDo $
 handleNSQ :: (Monad m, MonadIO m) => Producer BS.ByteString m () -> Consumer BS.ByteString m () -> ServerState -> m ()
 handleNSQ recv send ss = do
     -- Initial connection
-    runEffect $ handshake ss >-> showMessage >-> send
+    runEffect $ handshake ss >-> showCommand >-> send
 
     -- Regular nsq streaming
-    runEffect $ (nsqParserErrorLogging (logStream ss) recv) >-> command >-> showMessage >-> send
+    runEffect $ (nsqParserErrorLogging (logStream ss) recv) >-> command >-> showCommand >-> send
 
     return ()
 
@@ -85,32 +86,31 @@ nsqParserErrorLogging l producer = do
         Nothing -> liftIO $ BS.hPutStr l "Pipe is exhausted for nsq parser\n"
         Just y  ->
             case y of
-                Right x -> yield x
-                Left x  -> do
-                    liftIO $ BS.hPutStr l $ BS.concat
-                        [ "===========\n"
-                        , "\n"
-                        , C8.pack $ show x -- TODO: Ascii packing
-                        , "\n"
-                        , "===========\n"
-                        ]
-                    nsqParserErrorLogging l rest
+                Right x -> traceShow x $ yield x
+                Left x  -> liftIO $ BS.hPutStr l $ BS.concat
+                            [ "===========\n"
+                            , "\n"
+                            , C8.pack $ show x -- TODO: Ascii packing
+                            , "\n"
+                            , "===========\n"
+                            ]
+    nsqParserErrorLogging l rest
 
 --
--- Format outbound NSQ messages
+-- Format outbound NSQ Commands
 --
-showMessage :: Monad m => Pipe NSQ.Message BS.ByteString m ()
-showMessage = PP.map encode
+showCommand :: Monad m => Pipe NSQ.Command BS.ByteString m ()
+showCommand = PP.map encode
     where
         encode = NSQ.encode
 
 --
 -- Handshake for the initial connection to the network
 --
-handshake :: Monad m => ServerState -> Producer NSQ.Message m ()
+handshake :: Monad m => ServerState -> Producer NSQ.Command m ()
 handshake ss = do
 
-    yield $ NSQ.Identifier
+    yield $ NSQ.Protocol
 
     return ()
 
@@ -126,12 +126,10 @@ log h = forever $ do
 --
 -- Do something with the inbound message
 --
-command :: (Monad m, MonadIO m) => Pipe NSQ.Message NSQ.Message m ()
+command :: (Monad m, MonadIO m) => Pipe NSQ.Message NSQ.Command m ()
 command = forever $ do
     msg <- await
 
-    let result = []
-
-    -- TODO: Unsafe head
-    unless (null result) (yield $ head result)
-
+    case msg of
+        NSQ.Heartbeat -> yield $ NSQ.NOP
+        otherwise     -> return ()
