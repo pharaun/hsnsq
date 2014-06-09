@@ -27,6 +27,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Builder as BL
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as T
 
 import Control.Applicative
 import Control.Monad
@@ -43,6 +44,9 @@ import Debug.Trace
 data Command = Protocol
              | NOP
              | Identify IdentifyMetadata
+             | Sub T.Text T.Text Bool -- Topic, Channel, Ephemeral
+             | Pub T.Text BS.ByteString -- Topic, data
+             | MPub T.Text [BS.ByteString] -- Topic, multi-data
 
              -- Catch-all command to server
              | Command BS.ByteString
@@ -173,19 +177,42 @@ decode str = case parseOnly message str of
     Right r -> Just r
 
 
+sizedData :: BL.ByteString -> BL.Builder
+sizedData dat = (BL.word32BE $ fromIntegral $ BL.length $ dat) <> (BL.lazyByteString dat)
+
 -- Reply
 encode :: Command -> BS.ByteString
 encode Protocol     = "  V2"
 encode NOP          = "NOP\n"
-encode (Identify m) = BL.toStrict $ BL.toLazyByteString (
+encode (Identify ident) = BL.toStrict $ BL.toLazyByteString (
         (BL.byteString "IDENTIFY\n") <>
-        (BL.word32BE $ fromIntegral $ BL.length $ A.encode m) <>
-        (BL.lazyByteString $ A.encode m)
+        (sizedData $ A.encode ident)
     )
+encode (Sub topic channel ephemeral) = T.encodeUtf8 $ T.concat [ "SUB ", topic, " ", channel, if ephemeral then "#ephemeral" else "", "\n"]
+encode (Pub topic dat) = BL.toStrict $ BL.toLazyByteString (
+        (BL.byteString "PUB ") <>
+        (BL.byteString $ T.encodeUtf8 topic) <>
+        (BL.byteString "\n") <>
+        (sizedData $ BL.fromStrict dat)
+    )
+encode (MPub topic dx) = undefined
+--encode (MPub topic dx) = BL.toStrict $ BL.toLazyByteString (
+--        (BL.byteString "PUB ") <>
+--        (BL.byteString $ T.encodeUtf8 topic) <>
+--        (BL.byteString "\n") <>
+
+--MPUB <topic_name>\n
+--[ 4-byte body size ]
+--[ 4-byte num messages ]
+--[ 4-byte message #1 size ][ N-byte binary data ]
+--      ... (repeated <num_messages> times)
+--
+-- <topic_name> - a valid string
+
 encode (Command m)  = m
 
 
-
+-- TODO convert "E_*" into Error
 command :: BS.ByteString -> Message
 command "_heartbeat_" = Heartbeat
 command "OK" = OK
