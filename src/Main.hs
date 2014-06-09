@@ -113,6 +113,14 @@ handshake ss = do
     yield $ NSQ.Protocol
     yield $ NSQ.Identify $ (NSQ.defaultIdentify "pharaun-ASDF" "netheril.elder.lan."){NSQ.heartbeatInterval = Just $ NSQ.Custom 1000}
 
+    -- sub to a channel
+    yield $ NSQ.Sub "glc-gamestate" "netheril.elder.lan." False
+
+    -- Publish
+    yield $ NSQ.Pub "glc-gamestate" "{}"
+
+    yield $ NSQ.MPub "glc-gamestate" ["{}", "{}", "{}"]
+
     return ()
 
 --
