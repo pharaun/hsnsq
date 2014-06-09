@@ -20,6 +20,7 @@ import Data.Monoid
 import Data.Char
 import Data.Maybe
 import Data.Word
+import qualified Data.List as DL
 import Prelude hiding (take)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as C8
@@ -176,9 +177,20 @@ decode str = case parseOnly message str of
     Left _ -> Nothing
     Right r -> Just r
 
+-- TODO: this won't work for streaming the data...
+--  Should provide two api, one for in memory (ie where we count up the length of the data manualy
+--  And a "streaming" version in which we know the actual size before streaming (ie streaming from a file for ex)
+sizedData :: BS.ByteString -> BL.Builder
+sizedData dat = (BL.word32BE $ fromIntegral $ BS.length $ dat) <> (BL.byteString dat)
 
-sizedData :: BL.ByteString -> BL.Builder
-sizedData dat = (BL.word32BE $ fromIntegral $ BL.length $ dat) <> (BL.lazyByteString dat)
+
+-- Body of a foldl to build up a sequence of concat sized data
+concatSizedData :: (Word32, Word32, BL.Builder) -> BS.ByteString -> (Word32, Word32, BL.Builder)
+concatSizedData (totalSize, count, xs) dat = (
+        (totalSize + 4 + (fromIntegral $ BS.length dat)), -- Add 4 to accord for message size
+        (count + 1),
+        (xs <> sizedData dat)
+    )
 
 -- Reply
 encode :: Command -> BS.ByteString
@@ -186,30 +198,28 @@ encode Protocol     = "  V2"
 encode NOP          = "NOP\n"
 encode (Identify ident) = BL.toStrict $ BL.toLazyByteString (
         (BL.byteString "IDENTIFY\n") <>
-        (sizedData $ A.encode ident)
+        (sizedData $ BL.toStrict $ A.encode ident)
     )
 encode (Sub topic channel ephemeral) = T.encodeUtf8 $ T.concat [ "SUB ", topic, " ", channel, if ephemeral then "#ephemeral" else "", "\n"]
 encode (Pub topic dat) = BL.toStrict $ BL.toLazyByteString (
         (BL.byteString "PUB ") <>
         (BL.byteString $ T.encodeUtf8 topic) <>
         (BL.byteString "\n") <>
-        (sizedData $ BL.fromStrict dat)
+        (sizedData dat)
     )
-encode (MPub topic dx) = undefined
---encode (MPub topic dx) = BL.toStrict $ BL.toLazyByteString (
---        (BL.byteString "PUB ") <>
---        (BL.byteString $ T.encodeUtf8 topic) <>
---        (BL.byteString "\n") <>
-
---MPUB <topic_name>\n
---[ 4-byte body size ]
---[ 4-byte num messages ]
---[ 4-byte message #1 size ][ N-byte binary data ]
---      ... (repeated <num_messages> times)
---
--- <topic_name> - a valid string
+encode (MPub topic dx) = BL.toStrict $ BL.toLazyByteString (
+        (BL.byteString "MPUB ") <>
+        (BL.byteString $ T.encodeUtf8 topic) <>
+        (BL.byteString "\n") <>
+        (BL.word32BE $ totalSize + 4) <> -- Accord for message count
+        (BL.word32BE $ totalCount) <>
+        content
+    )
+    where
+        (totalSize, totalCount, content) = DL.foldl' concatSizedData (0, 0, mempty) dx
 
 encode (Command m)  = m
+
 
 
 -- TODO convert "E_*" into Error
