@@ -39,8 +39,8 @@ data ServerState = ServerState
 
 testConfig :: ServerConfig
 --testConfig = ServerConfig "glcwalker.ohl" 4150 "./test.log"
-testConfig = ServerConfig "10.0.0.171" 4150 "./test.log"
-
+--testConfig = ServerConfig "10.0.0.171" 4150 "./test.log"
+testConfig = ServerConfig "127.0.0.1" 4150 "./test.log"
 
 --
 -- Establish a session with this server
