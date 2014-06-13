@@ -20,6 +20,7 @@ import Data.Monoid
 import Data.Char
 import Data.Maybe
 import Data.Word
+import Data.Int
 import qualified Data.List as DL
 import Prelude hiding (take)
 import qualified Data.ByteString as BS
@@ -39,7 +40,9 @@ import Data.Aeson ((.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Types as A
 
-import Debug.Trace
+
+-- Message id
+type MsgId = BS.ByteString -- 16-byte hex string
 
 -- NSQ Command
 data Command = Protocol
@@ -48,18 +51,33 @@ data Command = Protocol
              | Sub T.Text T.Text Bool -- Topic, Channel, Ephemeral
              | Pub T.Text BS.ByteString -- Topic, data
              | MPub T.Text [BS.ByteString] -- Topic, multi-data
+             | Rdy Word64 -- Count
+             | Fin MsgId
+             | Req MsgId Word64 -- msgid, timeout
+             | Touch MsgId
+             | Cls
 
              -- Catch-all command to server
              | Command BS.ByteString
              deriving Show
 
+data FrameType = FTResponse
+               | FTError
+               | FTMessage
+
+               | FTUnknown Int32 -- For future extension for handling new Frame Types
+               deriving Show
 
 -- NSQ Message from server
+-- TODO: do we want to separate admistrative message from actual messages from NSQ?
 data Message = Heartbeat
              | OK
+             | Error BS.ByteString -- Reason
+
+             | Message Int64 Word16 MsgId BS.ByteString -- Nanosecond timestamp, attempts, messageid, body
 
              -- Catch-all (reply from server) (This currently include the reply from identification)
-             | Message BS.ByteString
+             | MMessage FrameType BS.ByteString
              deriving Show
 
 
@@ -196,11 +214,19 @@ concatSizedData (totalSize, count, xs) dat = (
 encode :: Command -> BS.ByteString
 encode Protocol     = "  V2"
 encode NOP          = "NOP\n"
+encode Cls          = "CLS\n"
 encode (Identify ident) = BL.toStrict $ BL.toLazyByteString (
         (BL.byteString "IDENTIFY\n") <>
         (sizedData $ BL.toStrict $ A.encode ident)
     )
-encode (Sub topic channel ephemeral) = T.encodeUtf8 $ T.concat [ "SUB ", topic, " ", channel, if ephemeral then "#ephemeral" else "", "\n"]
+encode (Sub topic channel ephemeral) = BL.toStrict $ BL.toLazyByteString (
+        (BL.byteString "SUB ") <>
+        (BL.byteString $ T.encodeUtf8 topic) <>
+        (BL.byteString " ") <>
+        (BL.byteString $ T.encodeUtf8 channel) <>
+        (BL.byteString $ if ephemeral then "#ephemeral" else "") <>
+        (BL.byteString "\n")
+    )
 encode (Pub topic dat) = BL.toStrict $ BL.toLazyByteString (
         (BL.byteString "PUB ") <>
         (BL.byteString $ T.encodeUtf8 topic) <>
@@ -218,6 +244,28 @@ encode (MPub topic dx) = BL.toStrict $ BL.toLazyByteString (
     where
         (totalSize, totalCount, content) = DL.foldl' concatSizedData (0, 0, mempty) dx
 
+encode (Rdy count) = BL.toStrict $ BL.toLazyByteString (
+        (BL.byteString "RDY ") <>
+        (BL.byteString $ C8.pack $ show count) <>
+        (BL.byteString "\n")
+    )
+encode (Fin msg_id) = BL.toStrict $ BL.toLazyByteString (
+        (BL.byteString "FIN ") <>
+        (BL.byteString msg_id) <>
+        (BL.byteString "\n")
+    )
+encode (Touch msg_id) = BL.toStrict $ BL.toLazyByteString (
+        (BL.byteString "TOUCH ") <>
+        (BL.byteString msg_id) <>
+        (BL.byteString "\n")
+    )
+encode (Req msg_id timeout) = BL.toStrict $ BL.toLazyByteString (
+        (BL.byteString "REQ ") <>
+        (BL.byteString msg_id) <>
+        (BL.byteString " ") <>
+        (BL.byteString $ C8.pack $ show timeout) <>
+        (BL.byteString "\n")
+    )
 encode (Command m)  = m
 
 
@@ -226,13 +274,38 @@ encode (Command m)  = m
 command :: BS.ByteString -> Message
 command "_heartbeat_" = Heartbeat
 command "OK" = OK
-command x = Message x
+command x = MMessage (FTUnknown 99) x -- TODO: Better FrameType
 
 
+frameType :: Int32 -> FrameType
+frameType 0 = FTResponse
+frameType 1 = FTError
+frameType 2 = FTMessage
+frameType x = FTUnknown x
+
+
+
+
+
+-- TODO: do sanity check such as checking that the size is of a minimal
+-- size, then parsing the frameType, then the remainder (fail "messg")
 message :: Parser Message
 message = do
-    size <- anyWord32be
-    frameType <- anyWord32be
-    mesg <- take $ (fromIntegral size) - 4 -- This is -4 because size refers to the rest of the message, not the message itself.
+    size <- fromIntegral <$> anyWord32be
+    frameType <- frameType <$> fromIntegral <$> anyWord32be
+    mesg <- frame frameType (size - 4) -- Taking in accord the frameType
 
-    return $ traceShow size $ traceShow frameType $ command mesg
+    return mesg
+
+
+frame :: FrameType -> Int -> Parser Message
+frame FTError    size = Error <$> take size
+frame FTResponse size = command <$> take size
+frame FTMessage  size = Message
+    <$> (fromIntegral <$> anyWord64be)
+    <*> anyWord16be
+    -- 16 bytes message id
+    <*> take 16
+    -- Taking in accord timestamp/attempts/msgid
+    <*> take (size - 26)
+frame ft size = MMessage ft <$> take size
