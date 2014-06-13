@@ -1,11 +1,38 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-|
+Module      : Network.NSQ
+Description : Protocol/parser layer for the NSQ client library.
+Copyright   : (c) Paul Berens, 2014
+License     : Apache 2.0
+Maintainer  : berens.paul@gmail.com
+Stability   : experimental
+Portability : unknown
+
+This is a haskell client for the <http://nsq.io/ NSQ> message queue service.
+
+TODO:
+
+    * Clean up the modules
+
+    * Start implementing a more through client
+
+    * Write some form of tests
+-}
 module Network.NSQ
     ( message
     , decode
     , encode
 
+    , MsgId
+    , Topic
+    , Channel
+
     , Message(..)
     , Command(..)
+
+    -- TODO: probably don't want to export constructor here but want pattern matching
+    , FrameType(..)
+    , ErrorType(..)
 
     , OptionalSetting(..)
     , TLS(..)
@@ -16,68 +43,89 @@ module Network.NSQ
 
     ) where
 
-import Data.Monoid
-import Data.Char
-import Data.Maybe
-import Data.Word
-import Data.Int
-import qualified Data.List as DL
 import Prelude hiding (take)
+import Control.Applicative
+import Data.Int
+import Data.Maybe
+import Data.Monoid
+import Data.Word
+
+import qualified Data.List as DL
+import qualified Data.Map.Strict as Map
+
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as C8
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Builder as BL
-import qualified Data.Map.Strict as Map
+
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
-import Control.Applicative
-import Control.Monad
 import Data.Attoparsec.Binary
-import Data.Attoparsec.ByteString
+import Data.Attoparsec.ByteString hiding (count)
 
 import Data.Aeson ((.=))
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Types as A
 
 
--- Message id
-type MsgId = BS.ByteString -- 16-byte hex string
+-- | Message Id, it is a 16-byte hexdecimal string encoded as ASCII
+type MsgId = BS.ByteString
 
--- NSQ Command
-data Command = Protocol
-             | NOP
-             | Identify IdentifyMetadata
-             | Sub T.Text T.Text Bool -- Topic, Channel, Ephemeral
-             | Pub T.Text BS.ByteString -- Topic, data
-             | MPub T.Text [BS.ByteString] -- Topic, multi-data
-             | Rdy Word64 -- Count
-             | Fin MsgId
-             | Req MsgId Word64 -- msgid, timeout
-             | Touch MsgId
-             | Cls
+-- | NSQ Topic, the only allowed character in a topic is @\\.a-zA-Z0-9_-@
+type Topic = T.Text
 
-             -- Catch-all command to server
-             | Command BS.ByteString
+-- | NSQ Channel, the only allowed character in a channel is @\\.a-zA-Z0-9_-@
+-- A channel can be marked as ephemeral by toggling the 'Bool' value to
+-- true in 'Sub'
+type Channel = T.Text
+
+-- | NSQ Command
+data Command = Protocol -- ^ The protocol version
+             | NOP -- ^ No-op, usually used in reply to a 'Heartbeat' request from the server.
+             | Identify IdentifyMetadata -- ^ Client Identification + possible features negotiation.
+             | Sub Topic Channel Bool -- ^ Subscribe to a specified 'Topic'/'Channel', use 'True' if its an ephemeral channel.
+             | Pub Topic BS.ByteString -- ^ Publish a message to the specified 'Topic'.
+             | MPub Topic [BS.ByteString] -- ^ Publish multiple messages to a specified 'Topic'.
+             | Rdy Word64 -- ^ Update @RDY@ state (ready to recieve messages). Number of message you can process at once.
+             | Fin MsgId -- ^ Finish a message.
+             | Req MsgId Word64 -- ^ Re-queue a message (failure to process), Timeout is in milliseconds.
+             | Touch MsgId -- ^ Reset the timeout for an in-flight message.
+             | Cls -- ^ Cleanly close the connection to the NSQ daemon.
+             | Command BS.ByteString -- ^ Catch-all command for future expansion/custom commands.
              deriving Show
 
-data FrameType = FTResponse
-               | FTError
-               | FTMessage
-
-               | FTUnknown Int32 -- For future extension for handling new Frame Types
+-- | Frame Type of the incoming data from the NSQ daemon.
+data FrameType = FTResponse -- ^ Response to a 'Command' from the server.
+               | FTError -- ^ An error in response to a 'Command'.
+               | FTMessage -- ^ Messages.
+               | FTUnknown Int32 -- ^ For future extension for handling new Frame Types.
                deriving Show
 
--- NSQ Message from server
--- TODO: do we want to separate admistrative message from actual messages from NSQ?
-data Message = Heartbeat
-             | OK
-             | Error BS.ByteString -- Reason
+-- | Types of error that the server can return in response to an 'Command'
+data ErrorType = Invalid
+               | BadBody
+               | BadTopic
+               | BadChannel
+               | BadMessage
+               | PubFailed
+               | MPubFailed
+               | FinFailed
+               | ReqFailed
+               | TouchFailed
+               deriving Show
 
-             | Message Int64 Word16 MsgId BS.ByteString -- Nanosecond timestamp, attempts, messageid, body
+-- | The message and replies back from the server.
+data Message = OK -- ^ Everything is allright.
+             | Heartbeat -- ^ Heartbeat, reply with the 'NOP' 'Command'.
+             | CloseWait -- ^ Server has closed the connection.
 
-             -- Catch-all (reply from server) (This currently include the reply from identification)
-             | MMessage FrameType BS.ByteString
+             -- TODO: BS.ByteString -> ErrorType
+             | Error BS.ByteString -- ^ The server sent back an error.
+
+             | Message Int64 Word16 MsgId BS.ByteString -- ^ A message to be processed. The values are: Nanosecond Timestamp, number of attempts, Message Id, and the content of the message to be processed.
+
+             | CatchAllMessage FrameType BS.ByteString -- ^ Catch-all message for future expansion. This currently includes the reply from 'Identify' if feature negotiation is set.
              deriving Show
 
 
@@ -134,18 +182,18 @@ defaultUserAgent = "hsnsq/0.1.0.0"
 
 
 (.?=) :: A.ToJSON a => T.Text -> Maybe a -> Maybe A.Pair
-name .?= Nothing  = Nothing
+_ .?= Nothing  = Nothing
 name .?= Just val = Just (name, A.toJSON val)
 
 
 featureNegotiation :: IdentifyMetadata -> [A.Pair]
 featureNegotiation im = catMaybes
     (
-        [ "tls_v1" .?= (tls im) -- TODO: not very good, what if there's other version of tls
-        , (optionalSettings "heartbeat_interval" (-1) $ heartbeatInterval im)
-        , (optionalSettings "output_buffer_size" (-1) $ outputBufferSize im)
-        , (optionalSettings "output_buffer_timeout" (-1) $ outputBufferTimeout im)
-        , (optionalSettings "sample_rate" 0 $ sampleRate im)
+        [ "tls_v1" .?= tls im -- TODO: not very good, what if there's other version of tls
+        , optionalSettings "heartbeat_interval" (-1) $ heartbeatInterval im
+        , optionalSettings "output_buffer_size" (-1) $ outputBufferSize im
+        , optionalSettings "output_buffer_timeout" (-1) $ outputBufferTimeout im
+        , optionalSettings "sample_rate" 0 $ sampleRate im
         ]
         ++
         optionalCompression (compression im)
@@ -171,17 +219,17 @@ instance A.ToJSON TLS where
     toJSON TLSV1 = A.Bool True
 
 instance A.ToJSON IdentifyMetadata where
-    toJSON im@(IdentifyMetadata{ident=ident}) = A.object
+    toJSON im@(IdentifyMetadata{ident=i}) = A.object
         (
             -- Identification section
-            [ "client_id"  .= (clientId ident)
-            , "hostname"   .= (hostname ident)
-            , "short_id"   .= (fromMaybe (clientId ident) (shortId ident))
-            , "long_id"    .= (fromMaybe (hostname ident) (longId ident))
-            , "user_agent" .= (fromMaybe defaultUserAgent (userAgent ident))
+            [ "client_id"  .= clientId i
+            , "hostname"   .= hostname i
+            , "short_id"   .= fromMaybe (clientId i) (shortId i)
+            , "long_id"    .= fromMaybe (hostname i) (longId i)
+            , "user_agent" .= fromMaybe defaultUserAgent (userAgent i)
 
             -- Feature Negotiation section
-            , "feature_negotiation" .= ((not $ null $ featureNegotiation im) || (customNegotiation im))
+            , "feature_negotiation" .= (not (null $ featureNegotiation im) || customNegotiation im)
             ]
             ++
             featureNegotiation im
@@ -199,15 +247,15 @@ decode str = case parseOnly message str of
 --  Should provide two api, one for in memory (ie where we count up the length of the data manualy
 --  And a "streaming" version in which we know the actual size before streaming (ie streaming from a file for ex)
 sizedData :: BS.ByteString -> BL.Builder
-sizedData dat = (BL.word32BE $ fromIntegral $ BS.length $ dat) <> (BL.byteString dat)
+sizedData dat = BL.word32BE (fromIntegral $ BS.length dat) <> BL.byteString dat
 
 
 -- Body of a foldl to build up a sequence of concat sized data
 concatSizedData :: (Word32, Word32, BL.Builder) -> BS.ByteString -> (Word32, Word32, BL.Builder)
 concatSizedData (totalSize, count, xs) dat = (
-        (totalSize + 4 + (fromIntegral $ BS.length dat)), -- Add 4 to accord for message size
-        (count + 1),
-        (xs <> sizedData dat)
+        totalSize + 4 + fromIntegral (BS.length dat), -- Add 4 to accord for message size
+        count + 1,
+        xs <> sizedData dat
     )
 
 -- Reply
@@ -215,56 +263,56 @@ encode :: Command -> BS.ByteString
 encode Protocol     = "  V2"
 encode NOP          = "NOP\n"
 encode Cls          = "CLS\n"
-encode (Identify ident) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "IDENTIFY\n") <>
-        (sizedData $ BL.toStrict $ A.encode ident)
+encode (Identify identify) = BL.toStrict $ BL.toLazyByteString (
+        BL.byteString "IDENTIFY\n" <>
+        sizedData (BL.toStrict $ A.encode identify)
     )
 encode (Sub topic channel ephemeral) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "SUB ") <>
-        (BL.byteString $ T.encodeUtf8 topic) <>
-        (BL.byteString " ") <>
-        (BL.byteString $ T.encodeUtf8 channel) <>
-        (BL.byteString $ if ephemeral then "#ephemeral" else "") <>
-        (BL.byteString "\n")
+        BL.byteString "SUB " <>
+        BL.byteString (T.encodeUtf8 topic) <>
+        BL.byteString " " <>
+        BL.byteString (T.encodeUtf8 channel) <>
+        BL.byteString (if ephemeral then "#ephemeral" else "") <>
+        BL.byteString "\n"
     )
 encode (Pub topic dat) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "PUB ") <>
-        (BL.byteString $ T.encodeUtf8 topic) <>
-        (BL.byteString "\n") <>
-        (sizedData dat)
+        BL.byteString "PUB " <>
+        BL.byteString (T.encodeUtf8 topic) <>
+        BL.byteString "\n" <>
+        sizedData dat
     )
 encode (MPub topic dx) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "MPUB ") <>
-        (BL.byteString $ T.encodeUtf8 topic) <>
-        (BL.byteString "\n") <>
-        (BL.word32BE $ totalSize + 4) <> -- Accord for message count
-        (BL.word32BE $ totalCount) <>
+        BL.byteString "MPUB " <>
+        BL.byteString (T.encodeUtf8 topic) <>
+        BL.byteString "\n" <>
+        BL.word32BE (totalSize + 4) <> -- Accord for message count
+        BL.word32BE totalCount <>
         content
     )
     where
         (totalSize, totalCount, content) = DL.foldl' concatSizedData (0, 0, mempty) dx
 
 encode (Rdy count) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "RDY ") <>
-        (BL.byteString $ C8.pack $ show count) <>
-        (BL.byteString "\n")
+        BL.byteString "RDY " <>
+        BL.byteString (C8.pack $ show count) <>
+        BL.byteString "\n"
     )
 encode (Fin msg_id) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "FIN ") <>
-        (BL.byteString msg_id) <>
-        (BL.byteString "\n")
+        BL.byteString "FIN " <>
+        BL.byteString msg_id <>
+        BL.byteString "\n"
     )
 encode (Touch msg_id) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "TOUCH ") <>
-        (BL.byteString msg_id) <>
-        (BL.byteString "\n")
+        BL.byteString "TOUCH " <>
+        BL.byteString msg_id <>
+        BL.byteString "\n"
     )
 encode (Req msg_id timeout) = BL.toStrict $ BL.toLazyByteString (
-        (BL.byteString "REQ ") <>
-        (BL.byteString msg_id) <>
-        (BL.byteString " ") <>
-        (BL.byteString $ C8.pack $ show timeout) <>
-        (BL.byteString "\n")
+        BL.byteString "REQ " <>
+        BL.byteString msg_id <>
+        BL.byteString " " <>
+        BL.byteString (C8.pack $ show timeout) <>
+        BL.byteString "\n"
     )
 encode (Command m)  = m
 
@@ -274,7 +322,8 @@ encode (Command m)  = m
 command :: BS.ByteString -> Message
 command "_heartbeat_" = Heartbeat
 command "OK" = OK
-command x = MMessage (FTUnknown 99) x -- TODO: Better FrameType
+command "CLOSE_WAIT" = CloseWait
+command x = CatchAllMessage (FTUnknown 99) x -- TODO: Better FrameType
 
 
 frameType :: Int32 -> FrameType
@@ -292,10 +341,8 @@ frameType x = FTUnknown x
 message :: Parser Message
 message = do
     size <- fromIntegral <$> anyWord32be
-    frameType <- frameType <$> fromIntegral <$> anyWord32be
-    mesg <- frame frameType (size - 4) -- Taking in accord the frameType
-
-    return mesg
+    ft <- frameType <$> fromIntegral <$> anyWord32be
+    frame ft (size - 4) -- Taking in accord the frameType
 
 
 frame :: FrameType -> Int -> Parser Message
@@ -308,4 +355,4 @@ frame FTMessage  size = Message
     <*> take 16
     -- Taking in accord timestamp/attempts/msgid
     <*> take (size - 26)
-frame ft size = MMessage ft <$> take size
+frame ft size = CatchAllMessage ft <$> take size
