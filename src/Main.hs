@@ -121,6 +121,10 @@ handshake ss = do
 
     yield $ NSQ.MPub "glc-gamestate" ["{}", "{}", "{}"]
 
+
+    -- Fetch a message
+    yield $ NSQ.Rdy 1
+
     return ()
 
 --

@@ -29,3 +29,4 @@ library
                      , pipes-attoparsec
                      , pipes-network
                      , text
+                     , mtl
