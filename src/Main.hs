@@ -37,6 +37,33 @@ data ServerState = ServerState
     }
 
 
+--
+-- State:
+--  * Per nsqd (connection) state (rdy, load balance, etc)
+--  * Per topic state (channel related info and which nsqd connection)
+--  * Global? state (do we have any atm? maybe configuration?)
+--
+
+
+--
+-- High level arch:
+--  * One queue per topic/channel
+--  * This queue can be feed by multiple nsqd (load balanced/nsqlookup for ex)
+--  * Probably will have one set of state/config per nsqd connection and per queue/topic/channel
+--  * Can probably later on provide helpers for consuming the queue
+--
+-- Detail:
+--  * Support connecting to a particular nsqd and doing the needful to
+--  establish identification and so forth
+--  * Auto-handle heartbeat and all related stuff
+--  * A higher layer will handle the message reading/balancing between multiplex nsqd connection for a particular topic/channel
+--
+-- Note:
+--  * One sub (topic/channel) per nsqd connection max, any more will get an E_INVALID
+--  * Seems to be able to publish to any topic/channel without limitation
+--
+
+
 testConfig :: ServerConfig
 --testConfig = ServerConfig "glcwalker.ohl" 4150 "./test.log"
 --testConfig = ServerConfig "10.0.0.171" 4150 "./test.log"
@@ -121,8 +148,7 @@ handshake ss = do
 
     yield $ NSQ.MPub "glc-gamestate" ["{}", "{}", "{}"]
 
-
-    -- Fetch a message
+    -- Open floodgate for 1 msg at a time
     yield $ NSQ.Rdy 1
 
     return ()
@@ -144,5 +170,16 @@ command = forever $ do
     msg <- await
 
     case msg of
-        NSQ.Heartbeat -> yield $ NSQ.NOP
-        otherwise     -> return ()
+        NSQ.Heartbeat         -> yield $ NSQ.NOP
+        NSQ.Message _ _ mId c -> do
+            liftIO $ BS.hPutStr stdout c
+            yield $ NSQ.Fin mId
+            --yield $ NSQ.Rdy 1
+
+        otherwise             -> return ()
+
+
+--             | Fin MsgId
+--             | Req MsgId Word64 -- msgid, timeout
+--             | Touch MsgId
+--             | Cls
