@@ -21,46 +21,23 @@ import qualified Pipes.Attoparsec as PA
 import qualified Pipes.Prelude as PP
 import Pipes
 
--- NSQ parser
-import qualified Network.NSQ as NSQ
 import Control.Applicative
+import Control.Concurrent.Async
+import Control.Concurrent.STM
+import Control.Concurrent.STM.TQueue
 
 import System.Log.Logger (debugM, errorM)
 
-
+import qualified Network.NSQ as NSQ
 import Network.NSQ.Types
-
-
---
--- State:
---  * Per nsqd (connection) state (rdy, load balance, etc)
---  * Per topic state (channel related info and which nsqd connection)
---  * Global? state (do we have any atm? maybe configuration?)
---
-
-
---
--- High level arch:
---  * One queue per topic/channel
---  * This queue can be feed by multiple nsqd (load balanced/nsqlookup for ex)
---  * Probably will have one set of state/config per nsqd connection and per queue/topic/channel
---  * Can probably later on provide helpers for consuming the queue
---
--- Detail:
---  * Support connecting to a particular nsqd and doing the needful to
---  establish identification and so forth
---  * Auto-handle heartbeat and all related stuff
---  * A higher layer will handle the message reading/balancing between multiplex nsqd connection for a particular topic/channel
---
--- Note:
---  * One sub (topic/channel) per nsqd connection max, any more will get an E_INVALID
---  * Seems to be able to publish to any topic/channel without limitation
---
-
-
 
 --
 -- Establish a session with this server
+--
+-- Detail:
+--  * Support connecting to a particular nsqd and doing the needful to establish identification and so forth
+--  * Auto-handle heartbeat and all related stuff
+--  * A higher layer will handle the message reading/balancing between multiplex nsqd connection for a particular topic/channel
 --
 establish :: ConnectionConfig -> IO ()
 establish sc = PNT.withSocketsDo $
@@ -68,7 +45,10 @@ establish sc = PNT.withSocketsDo $
     PNT.connect (server sc) (show $ port sc) (\(sock, _) -> do
 
         -- TODO: maybe consider PNT.fromSocketN so that we can adjust fetch size if needed downstream
-        handleNSQ (PNT.fromSocket sock 8192 >-> (log $ logName sc)) ((log $ logName sc) >-> PNT.toSocket sock) (ConnectionState sc)
+        let send = (log "send" $ logName sc) >-> PNT.toSocket sock
+        race_
+            (handleNSQ (PNT.fromSocket sock 8192 >-> (log "recv" $ logName sc)) send (ConnectionState sc))
+            (runEffect $ handleReply (replyQueue sc) >-> showCommand >-> send)
 
         return ()
     )
@@ -82,9 +62,21 @@ handleNSQ recv send ss = do
     runEffect $ handshake ss >-> showCommand >-> send
 
     -- Regular nsq streaming
-    runEffect $ (nsqParserErrorLogging (logName $ config ss) recv) >-> command >-> showCommand >-> send
+    runEffect $ (nsqParserErrorLogging (logName $ config ss) recv) >-> (command ss) >-> showCommand >-> send
 
     return ()
+
+--
+-- NSQ Reply handler
+--
+-- TODO: extend this to handle the rest of the interaction maybe? Or should
+-- only be for external commands, that way we can have priority (internal
+-- commands like nop gets priority over client commands?)
+--
+handleReply :: (Monad m, MonadIO m) => TQueue Command -> Producer NSQ.Command m ()
+handleReply queue = forever $ do
+    cmd <- liftIO $ atomically $ readTQueue queue
+    yield cmd
 
 --
 -- Parses incoming nsq messages and emits any errors to a log and keep going
@@ -97,7 +89,7 @@ nsqParserErrorLogging l producer = do
         Nothing -> liftIO $ errorM l "Pipe is exhausted for nsq parser\n"
         Just y  -> do
             case y of
-                Right x -> (liftIO $ debugM l (show x)) >> yield x
+                Right x -> (liftIO $ debugM l ("msg: " ++ show x)) >> yield x
                 Left x  -> liftIO $ errorM l (show x)
             nsqParserErrorLogging l rest
 
@@ -134,28 +126,26 @@ handshake ss = do
 --
 -- Log anything that passes through this stream to a logfile
 --
-log :: MonadIO m => LogName -> Pipe BS.ByteString BS.ByteString m r
-log l = forever $ do
+log :: MonadIO m => String -> LogName -> Pipe BS.ByteString BS.ByteString m r
+log w l = forever $ do
     x <- await
-    liftIO $ debugM l (show x) -- TODO: need a better way to log raw protocol messages
+    liftIO $ debugM l (w ++ ": " ++ show x) -- TODO: need a better way to log raw protocol messages
     yield x
 
 --
 -- Do something with the inbound message
 --
-command :: (Monad m, MonadIO m) => Pipe NSQ.Message NSQ.Command m ()
-command = forever $ do
+command :: (Monad m, MonadIO m) => ConnectionState -> Pipe NSQ.Message NSQ.Command m ()
+command ss = forever $ do
     msg <- await
 
     case msg of
         NSQ.Heartbeat         -> yield $ NSQ.NOP
-        NSQ.Message _ _ mId c -> do
-            liftIO $ BS.hPutStr stdout c
-            yield $ NSQ.Fin mId
+        NSQ.Message _ _ mId _ -> do
+            liftIO $ atomically $ writeTQueue (topicQueue $ config ss) msg
             --yield $ NSQ.Rdy 1
 
         otherwise             -> return ()
-
 
 --             | Fin MsgId
 --             | Req MsgId Word64 -- msgid, timeout

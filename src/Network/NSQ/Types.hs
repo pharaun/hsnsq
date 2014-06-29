@@ -31,6 +31,13 @@ import System.IO
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
+import Control.Concurrent.STM.TQueue (TQueue)
+
+-- High level arch:
+--  * One queue per topic/channel
+--  * This queue can be feed by multiple nsqd (load balanced/nsqlookup for ex)
+--  * Probably will have one set of state/config per nsqd connection and per queue/topic/channel
+--  * Can probably later on provide helpers for consuming the queue
 
 
 -- | Per Connection configuration
@@ -39,9 +46,14 @@ data ConnectionConfig = ConnectionConfig
     { server :: String
     , port :: PortNumber
     , logName :: LogName
+    , topicQueue :: TQueue Message -- TODO: probably want a dedicated message type here
+    , replyQueue :: TQueue Command -- TODO: command queue
     }
 
 -- | Ephemeral State
+--  * Per nsqd (connection) state (rdy, load balance, etc)
+--  * Per topic state (channel related info and which nsqd connection)
+--  * Global? state (do we have any atm? maybe configuration?)
 data ConnectionState = ConnectionState
     { config :: ConnectionConfig
     }

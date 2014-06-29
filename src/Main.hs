@@ -1,70 +1,61 @@
 {-# LANGUAGE OverloadedStrings #-}
-import Data.List
-import Data.Maybe
-import System.IO
-
-import qualified Data.ByteString as BS
-import qualified Pipes.Network.TCP as PNT
-import qualified Pipes.Attoparsec as PA
-import qualified Pipes.Prelude as PP
-import Pipes
-import Control.Applicative
-
 import Network.NSQ.Types
 import Network.NSQ.Connection
 
-import System.IO (stderr)
-import System.Log.Logger (rootLoggerName, setHandlers, updateGlobalLogger, Priority(DEBUG), setLevel)
+import Control.Concurrent.STM
+import Control.Monad
+import Control.Concurrent.Async
+import Control.Applicative
+
+-- Logger
+import System.IO (stderr, Handle)
+import System.Log.Logger (rootLoggerName, setHandlers, updateGlobalLogger, Priority(DEBUG), setLevel, infoM)
 import System.Log.Handler.Simple (streamHandler, GenericHandler)
 import System.Log.Handler (setFormatter)
 import System.Log.Formatter
 
+-- Queue
+import Control.Concurrent.STM.TQueue
 
-withFormatter :: GenericHandler Handle -> GenericHandler Handle
-withFormatter handler = setFormatter handler formatter
-    where formatter = simpleLogFormatter "[$time $loggername $prio] $msg"
 
 main = do
+    -- Logger stuff
     stream <- withFormatter <$> streamHandler stderr DEBUG
     let log = rootLoggerName
 
     updateGlobalLogger log (setLevel DEBUG)
     updateGlobalLogger log (setHandlers [stream])
 
+    -- Create a channel to pump data into
+    topicQueue <- newTQueueIO
+    replyQueue <- newTQueueIO
+
     -- Connect
-    establish testConfig
+    concurrently
+        (establish $ testConfig topicQueue replyQueue)
+        (consumeMessages topicQueue replyQueue)
 
 
-testConfig :: ConnectionConfig
-testConfig = ConnectionConfig "66.175.216.197" 4150 "NSQ.GameLost" -- TODO: standardize on some sort of logger hierchary (nsq server/topic?)
+-- TODO: standardize on some sort of logger hierchary (nsq server/topic?)
+-- NSQ.[subsystem].[topic].[connection] - message
+-- NSQ.[subsystem].[custom] ....
+testConfig :: TQueue Message -> TQueue Command -> ConnectionConfig
+testConfig = ConnectionConfig "66.175.216.197" 4150 "NSQ.GameLost"
+
+
+consumeMessages :: TQueue Message -> TQueue Command -> IO ()
+consumeMessages q r = forever $ do
+    msg <- atomically (do
+        m <- readTQueue q
+        writeTQueue r $ Fin $ mId m -- TODO: this can probably be moved out into the NSQ connection api
+        return m)
+    infoM "Client.Consume" (show msg)
+
+    where
+        mId (Message _ _ mesgId _) = mesgId
 
 
 
-
-
-
---
--- State:
---  * Per nsqd (connection) state (rdy, load balance, etc)
---  * Per topic state (channel related info and which nsqd connection)
---  * Global? state (do we have any atm? maybe configuration?)
---
-
-
---
--- High level arch:
---  * One queue per topic/channel
---  * This queue can be feed by multiple nsqd (load balanced/nsqlookup for ex)
---  * Probably will have one set of state/config per nsqd connection and per queue/topic/channel
---  * Can probably later on provide helpers for consuming the queue
---
--- Detail:
---  * Support connecting to a particular nsqd and doing the needful to
---  establish identification and so forth
---  * Auto-handle heartbeat and all related stuff
---  * A higher layer will handle the message reading/balancing between multiplex nsqd connection for a particular topic/channel
---
--- Note:
---  * One sub (topic/channel) per nsqd connection max, any more will get an E_INVALID
---  * Seems to be able to publish to any topic/channel without limitation
---
+withFormatter :: GenericHandler Handle -> GenericHandler Handle
+withFormatter handler = setFormatter handler formatter
+    where formatter = simpleLogFormatter "[$time $loggername $prio] $msg"

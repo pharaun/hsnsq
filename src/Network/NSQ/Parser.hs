@@ -81,6 +81,9 @@ concatSizedData (totalSize, count, xs) dat = (
     )
 
 -- Reply
+-- Note:
+--  * One sub (topic/channel) per nsqd connection max, any more will get an E_INVALID
+--  * Seems to be able to publish to any topic/channel without limitation
 encode :: Command -> BS.ByteString
 encode Protocol     = "  V2"
 encode NOP          = "NOP\n"
