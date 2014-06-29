@@ -31,3 +31,7 @@ library
                      , text
                      , mtl
                      , containers
+                     , stm-chans
+                     , stm
+                     , async
+                     , hslogger
