@@ -2,6 +2,7 @@ module Network.NSQ.Types
     ( MsgId
     , Topic
     , Channel
+    , LogName
 
     , Message(..)
     , Command(..)
@@ -16,15 +17,37 @@ module Network.NSQ.Types
     , Identification(..)
     , IdentifyMetadata(..)
 
+    -- Connection config/state
+    , ConnectionConfig(..)
+    , ConnectionState(..)
+
     ) where
 
 import Data.Int
 import Data.Word
+import Network
+import System.IO
 
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 
+
+-- | Per Connection configuration
+-- TODO: consider using monad-journal logger for pure code tracing
+data ConnectionConfig = ConnectionConfig
+    { server :: String
+    , port :: PortNumber
+    , logName :: LogName
+    }
+
+-- | Ephemeral State
+data ConnectionState = ConnectionState
+    { config :: ConnectionConfig
+    }
+
+-- | Logger Name for a connection (hslogger format)
+type LogName = String
 
 -- | Message Id, it is a 16-byte hexdecimal string encoded as ASCII
 type MsgId = BS.ByteString
