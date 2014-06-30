@@ -27,20 +27,14 @@ main = do
     updateGlobalLogger log (setHandlers [stream])
 
     -- Create a channel to pump data into
+    conf <- defaultConfig "66.175.216.197"
     topicQueue <- newTQueueIO
     replyQueue <- newTQueueIO
 
     -- Connect
-    concurrently
-        (establish $ testConfig topicQueue replyQueue)
+    race_
+        (establish conf topicQueue replyQueue)
         (consumeMessages topicQueue replyQueue)
-
-
--- TODO: standardize on some sort of logger hierchary (nsq server/topic?)
--- NSQ.[subsystem].[topic].[connection] - message
--- NSQ.[subsystem].[custom] ....
-testConfig :: TQueue Message -> TQueue Command -> ConnectionConfig
-testConfig = ConnectionConfig "66.175.216.197" 4150 "NSQ.GameLost"
 
 
 consumeMessages :: TQueue Message -> TQueue Command -> IO ()

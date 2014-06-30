@@ -18,8 +18,7 @@ module Network.NSQ.Types
     , IdentifyMetadata(..)
 
     -- Connection config/state
-    , ConnectionConfig(..)
-    , ConnectionState(..)
+    , NSQConnection(..)
 
     ) where
 
@@ -41,21 +40,16 @@ import Control.Concurrent.STM.TQueue (TQueue)
 
 
 -- | Per Connection configuration
--- TODO: consider using monad-journal logger for pure code tracing
-data ConnectionConfig = ConnectionConfig
-    { server :: String
-    , port :: PortNumber
-    , logName :: LogName
-    , topicQueue :: TQueue Message -- TODO: probably want a dedicated message type here
-    , replyQueue :: TQueue Command -- TODO: command queue
-    }
-
--- | Ephemeral State
 --  * Per nsqd (connection) state (rdy, load balance, etc)
 --  * Per topic state (channel related info and which nsqd connection)
 --  * Global? state (do we have any atm? maybe configuration?)
-data ConnectionState = ConnectionState
-    { config :: ConnectionConfig
+-- TODO: consider using monad-journal logger for pure code tracing
+data NSQConnection = NSQConnection
+    { server :: String
+    , port :: PortNumber
+    , logName :: LogName
+
+    , identConf :: IdentifyMetadata
     }
 
 -- | Logger Name for a connection (hslogger format)
