@@ -6,18 +6,14 @@ module Network.NSQ.Connection
     ) where
 
 import Control.Monad.Reader
-import Control.Monad.Trans.State.Strict
+import Control.Monad.State.Strict
 import Data.List
 import Data.Maybe
-import Network
 import Prelude hiding (log)
-import System.IO
-import System.Time
 import Network.HostName
 
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as C8
 
 import qualified Pipes.Network.TCP as PNT
 import qualified Pipes.Attoparsec as PA
@@ -27,12 +23,13 @@ import Pipes
 import Control.Applicative
 import Control.Concurrent.Async
 import Control.Concurrent.STM
-import Control.Concurrent.STM.TQueue
 
-import System.Log.Logger (debugM, errorM)
+import System.Log.Logger (debugM, errorM, warningM, infoM)
 
-import qualified Network.NSQ as NSQ
-import Network.NSQ.Types
+import Network.NSQ.Types (NSQConnection(..), Message, Command, server, port, logName, LogName, identConf)
+import qualified Network.NSQ.Types as NSQ
+import qualified Network.NSQ.Identify as NSQ
+import qualified Network.NSQ.Parser as NSQ
 
 
 --
@@ -43,12 +40,12 @@ import Network.NSQ.Types
 -- NSQ.[subsystem].[custom] ....
 --
 defaultConfig :: String -> IO NSQConnection
-defaultConfig server = do
-    hostname <- T.pack <$> getHostName
-    let clientId = T.takeWhile (/= '.') hostname
-    let ident = NSQ.defaultIdentify clientId hostname
+defaultConfig serverHost = do
+    localHost <- T.pack <$> getHostName
+    let localClientId = T.takeWhile (/= '.') localHost
+    let localIdent = NSQ.defaultIdentify localClientId localHost
 
-    return $ NSQConnection server 4150 "NSQ.Connection." ident
+    return $ NSQConnection serverHost 4150 "NSQ.Connection." localIdent
 
 --
 -- Establish a session with this server
@@ -88,13 +85,13 @@ handleNSQ sc recv send topicQueue = do
     runEffect $ (initialHandshake $ identConf sc) >-> showCommand >-> send
 
     -- Rest of the handshake process (parsing and dealing with identification)
-    runEffect $ (nsqParserErrorLogging (logName sc) recv) >-> identReply sc
+    runEffect $ (nsqParserErrorLogging (logName sc) recv) >-> identReply
 
     -- Setup the topic/channel/rdy
     runEffect $ setupTopic >-> showCommand >-> send
 
     -- Regular nsq streaming
-    runEffect $ (nsqParserErrorLogging (logName sc) recv) >-> (command topicQueue) >-> showCommand >-> send
+    runEffect $ (nsqParserErrorLogging (logName sc) recv) >-> (command (logName sc) topicQueue) >-> showCommand >-> send
 
     return ()
 
@@ -112,11 +109,11 @@ handleNSQ sc recv send topicQueue = do
             return ()
 
         -- Process the ident reply
-        identReply sc = do
-            ident <- await
+        identReply = do
+            identR <- await
 
             -- TODO: do stuff with it
-            liftIO $ debugM (logName sc) ("IDENT: " ++ show ident)
+            liftIO $ debugM (logName sc) ("IDENT: " ++ show identR)
 
             return ()
 
@@ -153,13 +150,18 @@ log w l = forever $ do
 --
 -- Do something with the inbound message
 --
-command :: (Monad m, MonadIO m) => TQueue Message -> Pipe NSQ.Message NSQ.Command m ()
-command topicQueue = forever $ do
+command :: (Monad m, MonadIO m) => LogName -> TQueue Message -> Pipe NSQ.Message NSQ.Command m ()
+command l topicQueue = forever $ do
     msg <- await
 
     case msg of
-        NSQ.Heartbeat         -> yield $ NSQ.NOP
-        NSQ.Message _ _ mId _ -> do
-            liftIO $ atomically $ writeTQueue topicQueue msg
-
-        otherwise             -> return ()
+        -- TODO: currently no-op
+        NSQ.OK                  -> return ()
+        NSQ.Heartbeat           -> yield $ NSQ.NOP
+        -- TODO: Implement a way to close our connection gracefully
+        NSQ.CloseWait           -> liftIO $ infoM l ("Error: Server closed queue")
+        -- TODO: should pass it onto the client or have a callback
+        NSQ.Error e             -> liftIO $ errorM l ("Error: " ++ show e)
+        NSQ.Message _ _ _ _     -> liftIO $ atomically $ writeTQueue topicQueue msg
+        -- TODO: should pass it onto the client or have a callback
+        NSQ.CatchAllMessage f m -> liftIO $ warningM l ("Error: Frame - " ++ show f ++ " - Msg - " ++ show m)

@@ -38,15 +38,12 @@ defaultIdentify cid host = IdentifyMetadata
 defaultUserAgent :: T.Text
 defaultUserAgent = "hsnsq/0.1.0.0"
 
-(.?=) :: A.ToJSON a => T.Text -> Maybe a -> Maybe A.Pair
-_ .?= Nothing  = Nothing
-name .?= Just val = Just (name, A.toJSON val)
-
 featureNegotiation :: IdentifyMetadata -> [A.Pair]
 featureNegotiation im = catMaybes
     (
-        [ "tls_v1" .?= tls im -- TODO: not very good, what if there's other version of tls
-        , optionalSettings "heartbeat_interval" (-1) $ heartbeatInterval im
+        tlsSettings (tls im)
+        ++
+        [ optionalSettings "heartbeat_interval" (-1) $ heartbeatInterval im
         , optionalSettings "output_buffer_size" (-1) $ outputBufferSize im
         , optionalSettings "output_buffer_timeout" (-1) $ outputBufferTimeout im
         , optionalSettings "sample_rate" 0 $ sampleRate im
@@ -70,10 +67,12 @@ customMetadata :: Maybe (Map.Map T.Text T.Text) -> [A.Pair]
 customMetadata Nothing    = []
 customMetadata (Just val) = Map.foldrWithKey (\k v xs -> (k .= v):xs) [] val
 
-instance A.ToJSON TLS where
-    toJSON NoTLS = A.Bool False
-    toJSON TLSV1 = A.Bool True
+tlsSettings :: Maybe TLS -> [Maybe A.Pair]
+tlsSettings Nothing      = []
+tlsSettings (Just NoTLS) = [Just $ "tls_v1" .= False]
+tlsSettings (Just TLSV1) = [Just $ "tls_v1" .= True]
 
+-- TODO: This is an Orphan instance because the type is in types.hs, need to fix this
 instance A.ToJSON IdentifyMetadata where
     toJSON im@(IdentifyMetadata{ident=i}) = A.object
         (

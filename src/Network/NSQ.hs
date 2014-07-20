@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-|
 Module      : Network.NSQ
 Description : Protocol/parser layer for the NSQ client library.
@@ -15,20 +14,17 @@ TODO:
     * Start implementing a more through client
 
     * Write some form of tests
+
+    * More through docs, the initial docs sucks.
 -}
 module Network.NSQ
-    ( message
-    , decode
-    , encode
-
-    , MsgId
+    ( MsgId
     , Topic
     , Channel
 
     , Message(..)
     , Command(..)
 
-    -- TODO: probably don't want to export constructor here but want pattern matching
     , FrameType(..)
     , ErrorType(..)
 
@@ -37,10 +33,25 @@ module Network.NSQ
     , Compression(..)
     , Identification(..)
     , IdentifyMetadata(..)
-    , defaultIdentify
 
+    , NSQConnection(..)
+
+    -- Parser
+    , message
+    , decode
+    , encode
+
+    -- Identify
+    , defaultIdentify
+    , defaultUserAgent
+    , encodeMetadata
+
+    -- Connection
+    , defaultConfig
+    , establish
     ) where
 
 import Network.NSQ.Types
 import Network.NSQ.Parser
 import Network.NSQ.Identify
+import Network.NSQ.Connection

@@ -25,12 +25,10 @@ module Network.NSQ.Types
 import Data.Int
 import Data.Word
 import Network
-import System.IO
 
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import Control.Concurrent.STM.TQueue (TQueue)
 
 -- High level arch:
 --  * One queue per topic/channel
