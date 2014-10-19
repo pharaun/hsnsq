@@ -62,3 +62,4 @@ executable nsq-example
                      , async
                      , hslogger
                      , hostname
+                     , optparse-applicative

@@ -63,6 +63,10 @@ establish conn topicQueue reply = PNT.withSocketsDo $
         -- TODO: maybe consider PNT.fromSocketN so that we can adjust fetch size if needed downstream
         let send = (log "send" $ logName conn) >-> PNT.toSocket sock
         let recv = PNT.fromSocket sock 8192 >-> (log "recv" $ logName conn)
+
+        -- Establish NSQ first then go into normal handle mode
+        establishNSQ conn recv send
+
         race_
             (handleNSQ conn recv send topicQueue)
             (runEffect $ handleReply reply >-> showCommand >-> send) -- Handles user replies
@@ -81,17 +85,20 @@ handleReply queue = forever $ do
 --
 handleNSQ :: (Monad m, MonadIO m) => NSQConnection -> Producer BS.ByteString m () -> Consumer BS.ByteString m () -> TQueue Message -> m ()
 handleNSQ sc recv send topicQueue = do
+    -- Regular nsq streaming
+    runEffect $ (nsqParserErrorLogging (logName sc) recv) >-> (command (logName sc) topicQueue) >-> showCommand >-> send
+    return ()
+
+--
+-- The NSQ establisher and protocol
+--
+establishNSQ :: (Monad m, MonadIO m) => NSQConnection -> Producer BS.ByteString m () -> Consumer BS.ByteString m () -> m ()
+establishNSQ sc recv send = do
     -- Initial handshake to kick off the handshake
     runEffect $ (initialHandshake $ identConf sc) >-> showCommand >-> send
 
     -- Rest of the handshake process (parsing and dealing with identification)
     runEffect $ (nsqParserErrorLogging (logName sc) recv) >-> identReply
-
-    -- Setup the topic/channel/rdy
-    runEffect $ setupTopic >-> showCommand >-> send
-
-    -- Regular nsq streaming
-    runEffect $ (nsqParserErrorLogging (logName sc) recv) >-> (command (logName sc) topicQueue) >-> showCommand >-> send
 
     return ()
 
@@ -100,12 +107,6 @@ handleNSQ sc recv send topicQueue = do
         initialHandshake im = do
             yield $ NSQ.Protocol
             yield $ NSQ.Identify im
-            return ()
-
-        -- TODO; replace it with actual logic
-        setupTopic = do
-            yield $ NSQ.Sub "glc-gamestate" "netheril.elder.lan." False
-            yield $ NSQ.Rdy 1
             return ()
 
         -- Process the ident reply
