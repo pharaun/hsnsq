@@ -63,3 +63,5 @@ executable nsq-example
                      , hslogger
                      , hostname
                      , optparse-applicative
+                     , old-locale
+                     , time
