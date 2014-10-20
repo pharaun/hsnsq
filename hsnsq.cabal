@@ -9,7 +9,7 @@ maintainer: berens.paul@gmail.com
 homepage: https://github.com/gamelost/hsnsq
 synopsis: Haskell NSQ client.
 description:
-    Currently a primitive NSQ client, it implements the very basics of an NSQ client for communicating with single NSQ servers. For example usage refer to https://github.com/gamelost/nsq-benchmarks/haskell/benchmark.hs
+    Currently a primitive NSQ client, it implements the very basics of an NSQ client for communicating with single NSQ servers. For example usage refer to <https://github.com/gamelost/nsq-benchmarks/haskell/benchmark.hs benchmark>
 category: Network
 author: Paul Berens
 extra-source-files:
