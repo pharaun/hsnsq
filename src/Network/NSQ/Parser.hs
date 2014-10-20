@@ -1,4 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-|
+Module      : Network.NSQ.Parser
+Description : Protocol Parser layer for the NSQ client library.
+-}
 module Network.NSQ.Parser
     ( message
     , decode
@@ -26,18 +30,34 @@ import Network.NSQ.Types
 import Network.NSQ.Identify
 
 
+-- | Decode the 'ByteString' to an 'Message'
 decode :: BS.ByteString -> Maybe Message
 decode str = case parseOnly message str of
     Left _ -> Nothing
     Right r -> Just r
 
--- TODO convert "E_*" into Error
-command :: BS.ByteString -> Message
-command "_heartbeat_" = Heartbeat
-command "OK" = OK
-command "CLOSE_WAIT" = CloseWait
-command x = CatchAllMessage (FTUnknown 99) x -- TODO: Better FrameType
 
+-- | Convert various nsq messages into useful 'Message' types
+command :: BS.ByteString -> Message
+command "_heartbeat_"   = Heartbeat
+command "OK"            = OK
+command "CLOSE_WAIT"    = CloseWait
+command x               = CatchAllMessage (FTUnknown 99) x -- TODO: Better FrameType
+
+-- | Convert various Error strings to 'ErrorType'
+errorCasting :: BS.ByteString -> ErrorType
+errorCasting "E_INVALID"         = Invalid
+errorCasting "E_BAD_BODY"        = BadBody
+errorCasting "E_BAD_TOPIC"       = BadTopic
+errorCasting "E_BAD_MESSAGE"     = BadMessage
+errorCasting "E_PUB_FAILED"      = PubFailed
+errorCasting "E_MPUB_FAILED"     = MPubFailed
+errorCasting "E_FIN_FAILED"      = FinFailed
+errorCasting "E_REQ_FAILED"      = ReqFailed
+errorCasting "E_TOUCH_FAILED"    = TouchFailed
+errorCasting x                   = Unknown x
+
+-- | Frame types into 'FrameType'
 frameType :: Int32 -> FrameType
 frameType 0 = FTResponse
 frameType 1 = FTError
@@ -46,14 +66,17 @@ frameType x = FTUnknown x
 
 -- TODO: do sanity check such as checking that the size is of a minimal
 -- size, then parsing the frameType, then the remainder (fail "messg")
+-- | Parse the low level message frames into a 'Message' type.
 message :: Parser Message
 message = do
     size <- fromIntegral <$> anyWord32be
     ft <- frameType <$> fromIntegral <$> anyWord32be
     frame ft (size - 4) -- Taking in accord the frameType
 
+-- | Parse in the frame (remaining portion) of the message in accordance of
+-- the 'Frametype'
 frame :: FrameType -> Int -> Parser Message
-frame FTError    size = Error <$> take size
+frame FTError    size = Error <$> (errorCasting `fmap` take size)
 frame FTResponse size = command <$> take size
 frame FTMessage  size = Message
     <$> (fromIntegral <$> anyWord64be)
@@ -68,9 +91,10 @@ frame ft size = CatchAllMessage ft <$> take size
 -- TODO: this won't work for streaming the data...
 --  Should provide two api, one for in memory (ie where we count up the length of the data manualy
 --  And a "streaming" version in which we know the actual size before streaming (ie streaming from a file for ex)
+-- | Primitive version for encoding the size of the data into the frame
+-- content then encoding the remaining.
 sizedData :: BS.ByteString -> BL.Builder
 sizedData dat = BL.word32BE (fromIntegral $ BS.length dat) <> BL.byteString dat
-
 
 -- Body of a foldl to build up a sequence of concat sized data
 concatSizedData :: (Word32, Word32, BL.Builder) -> BS.ByteString -> (Word32, Word32, BL.Builder)
@@ -80,10 +104,10 @@ concatSizedData (totalSize, count, xs) dat = (
         xs <> sizedData dat
     )
 
--- Reply
--- Note:
---  * One sub (topic/channel) per nsqd connection max, any more will get an E_INVALID
---  * Seems to be able to publish to any topic/channel without limitation
+-- | Encode a 'Command' into raw 'ByteString' to send to the network to the
+-- nsqd daemon. There are a few gotchas here; You can only have one 'Sub'
+-- (topic/channel) per nsqld connection, any other will yield 'Invalid'.
+-- Also you can publish to any number of topic without limitation.
 encode :: Command -> BS.ByteString
 encode Protocol     = "  V2"
 encode NOP          = "NOP\n"
